@@ -237,7 +237,8 @@ def create_ui(app: RecommenderApp):
 
         for i, movie in enumerate(movies, 1):
             title = movie['title']
-            genres = movie['genres']
+            # Replace pipe with comma for markdown table compatibility
+            genres = movie['genres'].replace('|', ', ')
             if show_similarity:
                 sim = f"{movie['similarity']:.3f}"
                 lines.append(f"| {i} | {title} | {genres} | {sim} |")

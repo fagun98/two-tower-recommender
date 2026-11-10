@@ -66,7 +66,10 @@ def evaluate(
     print("Loading data...")
     dataset = MovieLensDataset(data_dir)
     dataset.load()
-    dataset.split_leave_last_out()
+    dataset.split_leave_last_out(val_ratio=0.1)
+
+    # Build user histories
+    user_histories = dataset.build_user_histories(max_history=20)
 
     # Load model
     print("Loading model...")
@@ -104,8 +107,15 @@ def evaluate(
     for user_idx in tqdm(test_users, desc="Evaluating"):
         user_tensor = torch.LongTensor([user_idx]).to(device)
 
+        # Get user history
+        history = user_histories.get(user_idx, [])
+        if len(history) == 0:
+            history_tensor = torch.zeros(1, 1, dtype=torch.long, device=device)
+        else:
+            history_tensor = torch.LongTensor(history[-20:]).unsqueeze(0).to(device)
+
         with torch.no_grad():
-            user_emb = model.encode_user(user_tensor)
+            user_emb = model.encode_user(user_tensor, history_tensor)
             user_emb = user_emb.cpu().numpy()
 
         # Search FAISS

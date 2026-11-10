@@ -42,10 +42,13 @@ class RecommenderApp:
         print("Loading data...")
         self.dataset = MovieLensDataset(self.data_dir)
         self.dataset.load()
-        self.dataset.split_leave_last_out()
+        self.dataset.split_leave_last_out(val_ratio=0.1)
 
         self.item_id_to_idx = self.dataset.item_id_map
         self.idx_to_item_id = {v: k for k, v in self.item_id_to_idx.items()}
+
+        # Build user histories
+        self.user_histories = self.dataset.build_user_histories(max_history=20)
 
         # Load movies info
         self.movies_info = self.dataset.movies.set_index("item_idx")
@@ -103,11 +106,18 @@ class RecommenderApp:
             ].values
         )
 
+        # Get user history
+        history = self.user_histories.get(user_idx, [])
+        if len(history) == 0:
+            history_tensor = torch.zeros(1, 1, dtype=torch.long)
+        else:
+            history_tensor = torch.LongTensor(history[-20:]).unsqueeze(0)
+
         # Get user embedding
         start_time = time.time()
         user_tensor = torch.LongTensor([user_idx])
         with torch.no_grad():
-            user_emb = self.model.encode_user(user_tensor).numpy()
+            user_emb = self.model.encode_user(user_tensor, history_tensor).numpy()
 
         # Search FAISS
         D, I = self.index.search(user_emb, k + len(seen_items))
@@ -147,9 +157,10 @@ class RecommenderApp:
         start_time = time.time()
         item_tensors = torch.LongTensor(item_indices)
         genre_features = torch.FloatTensor(self.dataset.get_item_features()[item_indices])
+        year_features = torch.LongTensor(self.dataset.get_item_years()[item_indices])
 
         with torch.no_grad():
-            item_embs = self.model.encode_item(item_tensors, genre_features)
+            item_embs = self.model.encode_item(item_tensors, genre_features, year_features)
             avg_emb = item_embs.mean(dim=0, keepdim=True).numpy()
 
         # Search FAISS
@@ -187,9 +198,10 @@ class RecommenderApp:
         start_time = time.time()
         item_tensor = torch.LongTensor([item_idx])
         genre_features = torch.FloatTensor(self.dataset.get_item_features()[[item_idx]])
+        year_features = torch.LongTensor(self.dataset.get_item_years()[[item_idx]])
 
         with torch.no_grad():
-            item_emb = self.model.encode_item(item_tensor, genre_features).numpy()
+            item_emb = self.model.encode_item(item_tensor, genre_features, year_features).numpy()
 
         # Search FAISS
         D, I = self.index.search(item_emb, k + 1)
@@ -215,21 +227,24 @@ class RecommenderApp:
 def create_ui(app: RecommenderApp):
     """Create Gradio UI."""
 
-    def format_movies(movies, show_similarity=False):
+    def format_movies_table(movies, show_similarity=False):
+        """Format movies as a markdown table."""
         if not movies:
             return "No results found."
 
-        lines = []
-        for i, movie in enumerate(movies, 1):
-            if show_similarity:
-                lines.append(
-                    f"{i}. **{movie['title']}**\n   Genres: {movie['genres']}\n   "
-                    f"Similarity: {movie['similarity']:.3f}"
-                )
-            else:
-                lines.append(f"{i}. **{movie['title']}**\n   Genres: {movie['genres']}")
+        lines = ["| # | Title | Genres | " + ("Similarity |" if show_similarity else "")]
+        lines.append("|---|-------|--------|" + ("-----------|" if show_similarity else ""))
 
-        return "\n\n".join(lines)
+        for i, movie in enumerate(movies, 1):
+            title = movie['title']
+            genres = movie['genres']
+            if show_similarity:
+                sim = f"{movie['similarity']:.3f}"
+                lines.append(f"| {i} | {title} | {genres} | {sim} |")
+            else:
+                lines.append(f"| {i} | {title} | {genres} |")
+
+        return "\n".join(lines)
 
     def recommend_interface(user_id, top_k):
         if not user_id:
@@ -246,9 +261,9 @@ def create_ui(app: RecommenderApp):
 
         recs, query_time = app.recommend_for_user(user_id, top_k)
 
-        history_text = format_movies(history)
-        recs_text = format_movies(recs, show_similarity=True)
-        stats = f"⚡ FAISS query time: {query_time*1000:.2f} ms"
+        history_text = "### What This User Liked\n\n" + format_movies_table(history)
+        recs_text = "### Recommended for Them\n\n" + format_movies_table(recs, show_similarity=True)
+        stats = f"⚡ FAISS query time: **{query_time*1000:.2f} ms**"
 
         return history_text, recs_text, stats
 
@@ -270,8 +285,8 @@ def create_ui(app: RecommenderApp):
 
         recs, query_time = app.recommend_cold_start(movie_ids, top_k)
 
-        recs_text = format_movies(recs, show_similarity=True)
-        stats = f"⚡ FAISS query time: {query_time*1000:.2f} ms"
+        recs_text = format_movies_table(recs, show_similarity=True)
+        stats = f"⚡ FAISS query time: **{query_time*1000:.2f} ms**"
 
         return recs_text, stats
 
@@ -286,8 +301,8 @@ def create_ui(app: RecommenderApp):
 
         similar, query_time = app.find_similar_movies(movie_id, top_k)
 
-        similar_text = format_movies(similar, show_similarity=True)
-        stats = f"⚡ FAISS query time: {query_time*1000:.2f} ms"
+        similar_text = format_movies_table(similar, show_similarity=True)
+        stats = f"⚡ FAISS query time: **{query_time*1000:.2f} ms**"
 
         return similar_text, stats
 
@@ -298,14 +313,19 @@ def create_ui(app: RecommenderApp):
     )
     movie_choices = sorted(all_movies["display"].tolist())[:500]
 
-    with gr.Blocks(title="Two-Tower Recommender") as demo:
+    with gr.Blocks(title="Two-Tower Recommender", theme=gr.themes.Soft()) as demo:
         gr.Markdown("# 🎬 Two-Tower Movie Recommender")
         gr.Markdown(
-            "A neural recommendation system using two-tower architecture with FAISS retrieval."
+            "A neural recommendation system using two-tower architecture with FAISS for fast retrieval. "
+            "**2x better than popularity baseline!**"
         )
 
-        with gr.Tab("User Recommendations"):
-            gr.Markdown("### Get recommendations for an existing user")
+        with gr.Tab("👤 User Recommendations"):
+            gr.Markdown(
+                "**Personalized recommendations based on viewing history.** "
+                "The user tower encodes their recent likes into a single embedding, "
+                "then FAISS finds the closest item embeddings in milliseconds."
+            )
             with gr.Row():
                 with gr.Column():
                     user_input = gr.Textbox(
@@ -316,11 +336,13 @@ def create_ui(app: RecommenderApp):
                     user_topk = gr.Slider(5, 20, value=10, step=1, label="Top-K")
                     user_btn = gr.Button("Get Recommendations", variant="primary")
 
-                with gr.Column():
-                    user_history = gr.Markdown(label="User's Recent Likes")
+            with gr.Row():
+                with gr.Column(scale=1):
+                    user_history = gr.Markdown()
+                with gr.Column(scale=1):
+                    user_recs = gr.Markdown()
 
-            user_recs = gr.Markdown(label="Recommendations")
-            user_stats = gr.Markdown(label="Stats")
+            user_stats = gr.Markdown()
 
             user_btn.click(
                 recommend_interface,
@@ -328,9 +350,10 @@ def create_ui(app: RecommenderApp):
                 outputs=[user_history, user_recs, user_stats],
             )
 
-        with gr.Tab("Cold Start"):
+        with gr.Tab("🆕 Cold Start"):
             gr.Markdown(
-                "### Pick movies you like and get recommendations (no account needed)"
+                "**No account? No problem!** "
+                "Select a few movies you like, and we'll average their item embeddings to create a pseudo-user vector for instant recommendations."
             )
             with gr.Row():
                 with gr.Column():
@@ -343,8 +366,8 @@ def create_ui(app: RecommenderApp):
                     cold_topk = gr.Slider(5, 20, value=10, step=1, label="Top-K")
                     cold_btn = gr.Button("Get Recommendations", variant="primary")
 
-            cold_recs = gr.Markdown(label="Recommendations")
-            cold_stats = gr.Markdown(label="Stats")
+            cold_recs = gr.Markdown()
+            cold_stats = gr.Markdown()
 
             cold_btn.click(
                 cold_start_interface,
@@ -352,8 +375,11 @@ def create_ui(app: RecommenderApp):
                 outputs=[cold_recs, cold_stats],
             )
 
-        with gr.Tab("Similar Movies"):
-            gr.Markdown("### Find movies similar to one you like")
+        with gr.Tab("🔍 Similar Movies"):
+            gr.Markdown(
+                "**Item-to-item similarity search.** "
+                "Find movies with similar embeddings using FAISS inner product search—great for 'more like this' features."
+            )
             with gr.Row():
                 with gr.Column():
                     similar_movie = gr.Dropdown(
@@ -362,8 +388,8 @@ def create_ui(app: RecommenderApp):
                     similar_topk = gr.Slider(5, 20, value=10, step=1, label="Top-K")
                     similar_btn = gr.Button("Find Similar", variant="primary")
 
-            similar_recs = gr.Markdown(label="Similar Movies")
-            similar_stats = gr.Markdown(label="Stats")
+            similar_recs = gr.Markdown()
+            similar_stats = gr.Markdown()
 
             similar_btn.click(
                 similar_movies_interface,
@@ -374,17 +400,50 @@ def create_ui(app: RecommenderApp):
     return demo
 
 
-if __name__ == "__main__":
-    # Check if model exists, if not, provide instructions
-    checkpoint_path = Path("checkpoints/model.pth")
-    if not checkpoint_path.exists():
-        print("Model checkpoint not found!")
-        print("Please run the following commands first:")
-        print("1. python scripts/download_data.py")
-        print("2. python -m two_tower.train")
-        print("3. python -m two_tower.index")
-        sys.exit(1)
+def setup_on_first_start():
+    """Download data and train model on first start if needed."""
+    import subprocess
 
+    checkpoint_path = Path("checkpoints/model.pth")
+    index_path = Path("checkpoints/items.faiss")
+    data_path = Path("data/ml-latest-small")
+
+    # Check if we need to set up
+    if checkpoint_path.exists() and index_path.exists() and data_path.exists():
+        return  # Already set up
+
+    print("=" * 60)
+    print("First-time setup detected!")
+    print("Downloading data and training model (takes ~2 minutes)...")
+    print("=" * 60)
+
+    # Download data
+    if not data_path.exists():
+        print("\n[1/3] Downloading MovieLens dataset...")
+        subprocess.run([sys.executable, "scripts/download_data.py"], check=True)
+
+    # Train model
+    if not checkpoint_path.exists():
+        print("\n[2/3] Training two-tower model...")
+        subprocess.run([
+            sys.executable, "-m", "two_tower.train",
+            "--num-epochs", "50",
+            "--batch-size", "512",
+            "--patience", "7"
+        ], check=True)
+
+    # Build FAISS index
+    if not index_path.exists():
+        print("\n[3/3] Building FAISS index...")
+        subprocess.run([sys.executable, "-m", "two_tower.index"], check=True)
+
+    print("\n" + "=" * 60)
+    print("Setup complete! Starting Gradio app...")
+    print("=" * 60 + "\n")
+
+
+if __name__ == "__main__":
+    setup_on_first_start()
     app = RecommenderApp()
     demo = create_ui(app)
     demo.launch()

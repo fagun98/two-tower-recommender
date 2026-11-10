@@ -12,12 +12,14 @@ def test_interaction_dataset():
         {"user_idx": [0, 0, 1, 1, 2], "item_idx": [10, 20, 10, 30, 40], "rating": [5, 4, 5, 4, 5]}
     )
 
-    dataset = InteractionDataset(ratings)
+    user_histories = {0: [1, 2, 3], 1: [4, 5], 2: [6]}
+    dataset = InteractionDataset(ratings, user_histories)
 
     assert len(dataset) == 5
-    user_idx, item_idx = dataset[0]
+    user_idx, item_idx, history = dataset[0]
     assert user_idx.item() == 0
     assert item_idx.item() == 10
+    assert len(history) > 0
 
 
 def test_genre_encoding_shape():

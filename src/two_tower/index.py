@@ -42,10 +42,11 @@ def build_faiss_index(
     # Generate embeddings for all items
     print("Generating item embeddings...")
     genre_features = torch.FloatTensor(dataset.get_item_features()).to(device)
+    year_features = torch.LongTensor(dataset.get_item_years()).to(device)
     all_item_ids = torch.arange(dataset.get_num_items(), device=device)
 
     with torch.no_grad():
-        item_embeddings = model.encode_item(all_item_ids, genre_features)
+        item_embeddings = model.encode_item(all_item_ids, genre_features, year_features)
         item_embeddings = item_embeddings.cpu().numpy()
 
     # Build FAISS index (using inner product for normalized vectors)
